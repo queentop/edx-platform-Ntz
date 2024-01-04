@@ -48,7 +48,16 @@ INTERESTING_STATUSES = [
 MAX_RETRIES = 11
 
 
-@shared_task(bind=True, ignore_result=True)
+# @shared_task(bind=True, ignore_result=True)
+@shared_task(
+    bind=True,
+    ignore_result=True,
+    autoretry_for=(Exception,),
+    max_retries=10,
+    retry_backoff=30,
+    retry_backoff_max=600,
+    retry_jitter=True,
+)
 @set_code_owner_attribute
 def send_grade_to_credentials(
     self,
@@ -70,35 +79,63 @@ def send_grade_to_credentials(
         percent_grade (float): Number representing the learner's grade in this course run
         grade_last_updated (string): String describing the last time this grade was modified in the LMS
     """
-    logger.info(f"Running task send_grade_to_credentials for username {username} and course {course_run_key}")
+    # logger.info(f"Running task send_grade_to_credentials for username {username} and course {course_run_key}")
 
-    countdown = 2 ** self.request.retries
+    # countdown = 2 ** self.request.retries
+    # course_key = CourseKey.from_string(course_run_key)
+
+    # try:
+    #     credentials_client = get_credentials_api_client(
+    #         User.objects.get(username=settings.CREDENTIALS_SERVICE_USERNAME)
+    #     )
+    #     api_url = urljoin(f"{get_credentials_api_base_url(org=course_key.org)}/", "grades/")
+    #     response = credentials_client.post(
+    #         api_url,
+    #         data={
+    #             'username': username,
+    #             'course_run': course_run_key,
+    #             'letter_grade': letter_grade,
+    #             'percent_grade': percent_grade,
+    #             'verified': verified,
+    #             'lms_last_updated_at': grade_last_updated
+    #         }
+    #     )
+    #     response.raise_for_status()
+    #     logger.info(f"Sent grade for course {course_run_key} for user {username}")
+    # except Exception:  # lint-amnesty, pylint: disable=W0703
+    #     grade_str = f'(percent: {percent_grade} letter: {letter_grade})'
+    #     error_msg = f'Failed to send grade {grade_str} for course {course_run_key} for user {username}.'
+    #     logger.exception(error_msg)
+    #     exception = MaxRetriesExceededError(f"Failed to send grade to credentials. Reason: {error_msg}")
+    #     raise self.retry(exc=exception, countdown=countdown, max_retries=MAX_RETRIES)  # pylint: disable=raise-missing-from
+    logger.info(f"Running task send_grade_to_credentials for username {username} and course {course_run_key}")
     course_key = CourseKey.from_string(course_run_key)
 
-    try:
-        credentials_client = get_credentials_api_client(
-            User.objects.get(username=settings.CREDENTIALS_SERVICE_USERNAME)
-        )
-        api_url = urljoin(f"{get_credentials_api_base_url(org=course_key.org)}/", "grades/")
-        response = credentials_client.post(
-            api_url,
-            data={
-                'username': username,
-                'course_run': course_run_key,
-                'letter_grade': letter_grade,
-                'percent_grade': percent_grade,
-                'verified': verified,
-                'lms_last_updated_at': grade_last_updated
-            }
-        )
-        response.raise_for_status()
-        logger.info(f"Sent grade for course {course_run_key} for user {username}")
-    except Exception:  # lint-amnesty, pylint: disable=W0703
-        grade_str = f'(percent: {percent_grade} letter: {letter_grade})'
-        error_msg = f'Failed to send grade {grade_str} for course {course_run_key} for user {username}.'
-        logger.exception(error_msg)
-        exception = MaxRetriesExceededError(f"Failed to send grade to credentials. Reason: {error_msg}")
-        raise self.retry(exc=exception, countdown=countdown, max_retries=MAX_RETRIES)  # pylint: disable=raise-missing-from
+    credentials_client = get_credentials_api_client(
+        User.objects.get(username=settings.CREDENTIALS_SERVICE_USERNAME)
+    )
+    api_url = urljoin(f"{get_credentials_api_base_url(org=course_key.org)}/", "grades/")
+    response = credentials_client.post(
+        api_url,
+        data={
+            'username': username,
+            'course_run': course_run_key,
+            'letter_grade': letter_grade,
+            'percent_grade': percent_grade,
+            'verified': verified,
+            'lms_last_updated_at': grade_last_updated
+        }
+    )
+    response.raise_for_status()
+    logger.info(f"Sent grade for course {course_run_key} for user {username}")
+
+
+    # except Exception:  # lint-amnesty, pylint: disable=W0703
+    #     grade_str = f'(percent: {percent_grade} letter: {letter_grade})'
+    #     error_msg = f'Failed to send grade {grade_str} for course {course_run_key} for user {username}.'
+    #     logger.exception(error_msg)
+    #     exception = MaxRetriesExceededError(f"Failed to send grade to credentials. Reason: {error_msg}")
+    #     raise self.retry(exc=exception, countdown=countdown, max_retries=MAX_RETRIES)  # pylint: disable=raise-missing-from
 
 
 @shared_task(base=LoggedTask, ignore_result=True)
@@ -209,14 +246,14 @@ def send_notifications(
             'status': cert.status
         }
         course_cert_info[(cert.user.id, str(cert.course_id))] = data
-        # handles awarding course certificates in Credentials
-        handle_course_cert_changed(**signal_args)
-        # handles awarding program certificates in Credentials
-        if notify_programs and CertificateStatuses.is_passing_status(cert.status):
-            handle_course_cert_awarded(**signal_args)
-        # handles revoking program certificates in Credentials
-        if revoke_program_certs and notify_programs and not CertificateStatuses.is_passing_status(cert.status):
-            handle_course_cert_revoked(**signal_args)
+        # # handles awarding course certificates in Credentials
+        # handle_course_cert_changed(**signal_args)
+        # # handles awarding program certificates in Credentials
+        # if notify_programs and CertificateStatuses.is_passing_status(cert.status):
+        #     handle_course_cert_awarded(**signal_args)
+        # # handles revoking program certificates in Credentials
+        # if revoke_program_certs and notify_programs and not CertificateStatuses.is_passing_status(cert.status):
+        #     handle_course_cert_revoked(**signal_args)
 
     # Then do grades
     for i, grade in paged_query(grades, delay, page_size):
