@@ -147,7 +147,7 @@ class DiscussionNotificationSender:
         if (
             self.parent_response and
             self.creator.id != int(self.parent_response.user_id) and not
-        self._response_and_thread_has_same_creator()
+            self._response_and_thread_has_same_creator()
         ):
             self._send_notification([self.parent_response.user_id], "new_comment_on_response")
 
