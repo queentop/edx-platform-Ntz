@@ -1,20 +1,25 @@
 """
 Unit tests for SafeSessionMiddleware
 """
-
+import uuid
 from unittest.mock import call, patch, MagicMock
 
 import ddt
 from crum import set_current_request
 from django.conf import settings
 from django.contrib.auth import SESSION_KEY
-from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import AnonymousUser, User  # lint-amnesty, pylint: disable=imported-auth-user
 from django.http import HttpResponse, HttpResponseRedirect, SimpleCookie
 from django.test import TestCase
 from django.test.utils import override_settings
+from django.urls import reverse
 from edx_django_utils.cache import RequestCache
+from edx_rest_framework_extensions.auth.jwt import cookies as jwt_cookies
 
-from openedx.core.djangolib.testing.utils import get_mock_request, CacheIsolationTestCase
+from common.djangoapps.student.models import PendingEmailChange
+from openedx.core.djangolib.testing.utils import get_mock_request, CacheIsolationTestCase, skip_unless_lms
+from openedx.core.djangoapps.user_authn.tests.utils import setup_login_oauth_client
+from openedx.core.djangoapps.user_authn.cookies import ALL_LOGGED_IN_COOKIE_NAMES
 from common.djangoapps.student.tests.factories import UserFactory
 
 from ..middleware import (
@@ -619,6 +624,7 @@ class TestTrackRequestUserChanges(TestCase):
         assert "Changing request user but user has no id." in request.debug_user_changes[1]
 
 
+@skip_unless_lms
 class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
     """
     Test class for EmailChangeMiddleware
@@ -626,14 +632,19 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
 
     def setUp(self):
         super().setUp()
-        self.TEST_PASSWORD = 'Password1234'
-        self.user = UserFactory.create(email='test@example.com', password=self.TEST_PASSWORD)
+        self.EMAIL = 'test@example.com'
+        self.PASSWORD = 'Password1234'
+        self.user = UserFactory.create(email=self.EMAIL, password=self.PASSWORD)
         self.addCleanup(set_current_request, None)
         self.request = get_mock_request(self.user)
         self.request.session = {}
         self.client.response = HttpResponse()
         self.client.response.cookies = SimpleCookie()
         self.addCleanup(RequestCache.clear_all_namespaces)
+
+        self.login_url = reverse("user_api_login_session", kwargs={'api_version': 'v2'})
+        self.register_url = reverse("user_api_registration_v2")
+        self.dashboard_url = reverse('dashboard')
 
     @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
     @patch('openedx.core.djangoapps.safe_sessions.middleware._mark_cookie_for_deletion')
@@ -661,7 +672,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         Verifies that session and cookies are not affected.
         """
         # Log in the user
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
 
         # Ensure no email is stored in the session
@@ -686,7 +697,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         Verifies that session and cookies are not affected.
         """
         # Log in the user
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
         self.client.response.set_cookie(settings.SESSION_COOKIE_NAME, 'authenticated')  # Add some logged-in cookie
 
@@ -730,7 +741,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         Verifies that session is flushed and cookies are marked for deletion.
         """
         # Log in the user
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
         self.client.response.set_cookie(settings.SESSION_COOKIE_NAME, 'authenticated')  # Add some logged-in cookie
 
@@ -772,7 +783,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         Test that sessions predating this code are not affected.
         """
         # Log in the user (Simulating user logged-in before this code and email was not set in session)
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
         self.client.response.set_cookie(settings.SESSION_COOKIE_NAME, 'authenticated')  # Add some logged-in cookie
 
@@ -829,7 +840,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         mock_set_logged_in_cookies.return_value = self.client.response
 
         # Log in the user
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
         self.client.response.set_cookie(settings.SESSION_COOKIE_NAME, 'authenticated')  # Add some logged-in cookie
 
@@ -858,7 +869,7 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         mock_set_logged_in_cookies.return_value = self.client.response
 
         # Log in the user
-        self.client.login(email=self.user.email, password=self.TEST_PASSWORD)
+        self.client.login(email=self.user.email, password=self.PASSWORD)
         self.request.session = self.client.session
         self.client.response.set_cookie(settings.SESSION_COOKIE_NAME, 'authenticated')  # Add some logged-in cookie
 
@@ -873,3 +884,282 @@ class TestEmailChangeMiddleware(TestSafeSessionsLogMixin, TestCase):
         # Assert that cookies are not updated
         # Assert that mock_set_logged_in_cookies not called
         mock_set_logged_in_cookies.assert_not_called()
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    def test_user_remain_authenticated_on_email_change_in_other_browser_with_toggle_disabled(self):
+        """
+        Integration Test: test that a user remains authenticated upon email change
+        in other browser when ENFORCE_SESSION_EMAIL_MATCH toggle is disabled
+        Verify that the session and cookies are not affected
+        """
+        setup_login_oauth_client()
+
+        # Login the user with 'test@example.com` email and test password in current browser
+        response = self.client.post(self.login_url, {
+            "email_or_username": self.EMAIL,
+            "password": self.PASSWORD,
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # simulating email changed in some other browser (Email is changed in DB)
+        self.user.email = 'new_email@test.com'
+        self.user.save()
+
+        # Verify that the user remains authenticated in current browser and can access the dashboard
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
+    def test_cookies_are_updated_with_new_email_on_email_change(self):
+        """
+        Integration Test: test that cookies are updated with new email upon email change
+        in browser.
+        Verify that the cookies are updated
+        """
+        setup_login_oauth_client()
+
+        # Login the user with 'test@example.com` email and test password in current browser
+        login_response = self.client.post(self.login_url, {
+            "email_or_username": self.EMAIL,
+            "password": self.PASSWORD,
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert login_response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(login_response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # simulating email change in current browser
+        activation_key = uuid.uuid4().hex
+        PendingEmailChange.objects.update_or_create(
+            user=self.user,
+            defaults={
+                'new_email': 'new_email@test.com',
+                'activation_key': activation_key,
+            }
+        )
+        email_change_response = self.client.get(
+            reverse('confirm_email_change', kwargs={'key': activation_key}),
+        )
+
+        # Verify that email change is successful
+        assert email_change_response.status_code == 200
+        self._assert_logged_in_cookies_present(email_change_response)
+
+        # Verify that jwt cookies are updated with new email and
+        # not equal to old logged-in cookies in current browser
+        self.assertNotEqual(
+            login_response.cookies[jwt_cookies.jwt_cookie_header_payload_name()].value,
+            email_change_response.cookies[jwt_cookies.jwt_cookie_header_payload_name()].value
+        )
+        self.assertNotEqual(
+            login_response.cookies[jwt_cookies.jwt_cookie_signature_name()].value,
+            email_change_response.cookies[jwt_cookies.jwt_cookie_signature_name()].value
+        )
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
+    def test_logged_in_user_unauthenticated_on_email_change_in_other_browser(self):
+        """
+        Integration Test: Test that a user logged-in in one browser gets unauthenticated
+        when the email is changed in some other browser and the request and session emails mismatch.
+        Verify that the session is invalidated and cookies are deleted
+        """
+        setup_login_oauth_client()
+
+        # Login the user with 'test@example.com` email and test password in current browser
+        response = self.client.post(self.login_url, {
+            "email_or_username": self.EMAIL,
+            "password": self.PASSWORD,
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # simulating email changed in some other browser (Email is changed in DB)
+        self.user.email = 'new_email@test.com'
+        self.user.save()
+
+        # Verify that the user get unauthenticated in current browser and cannot access the dashboard
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 302
+        self._assert_logged_in_cookies_not_present(response)
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
+    def test_logged_in_user_remains_authenticated_on_email_change_in_same_browser(self):
+        """
+        Integration Test: test that a user logged-in in some browser remains authenticated
+        when the email is changed in same browser.
+        Verify that the session and cookies are not affected
+        """
+        setup_login_oauth_client()
+
+        # Login the user with 'test@example.com` email and test password in current browser
+        response = self.client.post(self.login_url, {
+            "email_or_username": self.EMAIL,
+            "password": self.PASSWORD,
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # simulating email change in current browser
+        activation_key = uuid.uuid4().hex
+        PendingEmailChange.objects.update_or_create(
+            user=self.user,
+            defaults={
+                'new_email': 'new_email@test.com',
+                'activation_key': activation_key,
+            }
+        )
+        email_change_response = self.client.get(
+            reverse('confirm_email_change', kwargs={'key': activation_key}),
+        )
+
+        # Verify that email change is successful and all logged-in
+        # cookies are set in current browser
+        assert email_change_response.status_code == 200
+        self._assert_logged_in_cookies_present(email_change_response)
+
+        # Verify that the user remains authenticated in current browser and can access the dashboard
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
+    def test_registered_user_unauthenticated_on_email_change_in_other_browser(self):
+        """
+        Integration Test: Test that a user registered in one browser gets unauthenticated
+        when the email is changed in some other browser and the request and session emails mismatch.
+        Verify that the session is invalidated and cookies are deleted
+        """
+        setup_login_oauth_client()
+
+        # Register the user with 'john_doe@example.com` email and test password in current browser
+        response = self.client.post(self.register_url, {
+            "email": 'john_doe@example.com',
+            "name": 'John Doe',
+            "username": 'john_doe',
+            "password": 'password',
+            "honor_code": "true",
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # simulating email changed in some other browser (Email is changed in DB)
+        registered_user = User.objects.get(email='john_doe@example.com')
+        registered_user.email = 'new_email@test.com'
+        registered_user.save()
+
+        # Verify that the user get unauthenticated in current browser and cannot access the dashboard
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 302
+        self._assert_logged_in_cookies_not_present(response)
+
+    @patch.dict("django.conf.settings.FEATURES", {"DISABLE_SET_JWT_COOKIES_FOR_TESTS": False})
+    @override_settings(ENFORCE_SESSION_EMAIL_MATCH=True)
+    def test_registered_user_remain_authenticated_on_email_change_in_same_browser(self):
+        """
+        Integration Test: test that a user registered in one browser remains
+        authenticated when the email is changed in same browser.
+        Verify that the session and cookies are not affected
+        """
+        setup_login_oauth_client()
+
+        # Register the user with 'john_doe@example.com` email and test password in current browser
+        response = self.client.post(self.register_url, {
+            "email": 'john_doe@example.com',
+            "name": 'John Doe',
+            "username": 'john_doe',
+            "password": 'password',
+            "honor_code": "true",
+        })
+        # Verify that the user is logged in successfully in current browser
+        assert response.status_code == 200
+        # Verify that the logged-in cookies are set in current browser
+        self._assert_logged_in_cookies_present(response)
+
+        # Verify that the authenticated user can access the dashboard in current browser
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+        # getting newly created user
+        registered_user = User.objects.get(email='john_doe@example.com')
+
+        # simulating email change in current browser
+        activation_key = uuid.uuid4().hex
+        PendingEmailChange.objects.update_or_create(
+            user=registered_user,
+            defaults={
+                'new_email': 'new_email@test.com',
+                'activation_key': activation_key,
+            }
+        )
+        email_change_response = self.client.get(
+            reverse('confirm_email_change', kwargs={'key': activation_key}),
+        )
+
+        # Verify that email change is successful and all logged-in
+        # cookies are updated with new email in current browser
+        assert email_change_response.status_code == 200
+        self._assert_logged_in_cookies_present(email_change_response)
+
+        # Verify that the user remains authenticated in current browser and can access the dashboard
+        response = self.client.get(self.dashboard_url)
+        assert response.status_code == 200
+
+    def _assert_logged_in_cookies_present(self, response):
+        """
+        Helper function to verify that all logged-in cookies are available
+        and have valid values (not empty strings)
+        """
+        all_cookies = ALL_LOGGED_IN_COOKIE_NAMES + (settings.SESSION_COOKIE_NAME,)
+
+        for cookie in all_cookies:
+            # Check if the cookie is present in response.cookies.keys()
+            self.assertIn(cookie, response.cookies.keys())
+
+            # Assert that the value is not an empty string
+            self.assertNotEqual(response.cookies[cookie].value, "")
+
+    def _assert_logged_in_cookies_not_present(self, response):
+        """
+        Helper function to verify that all logged-in cookies are cleared
+        and have empty values
+        """
+        all_cookies = ALL_LOGGED_IN_COOKIE_NAMES + (settings.SESSION_COOKIE_NAME,)
+
+        for cookie in all_cookies:
+            # Check if the cookie is present in response.cookies.keys()
+            self.assertIn(cookie, response.cookies.keys())
+
+            # Assert that the value is not an empty string
+            self.assertEqual(response.cookies[cookie].value, "")
