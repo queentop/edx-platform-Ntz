@@ -6,7 +6,6 @@ import time
 from urllib.parse import urljoin
 
 from celery import shared_task
-from celery.exceptions import MaxRetriesExceededError
 from celery.utils.log import get_task_logger
 from celery_utils.logged_task import LoggedTask
 from django.conf import settings
