@@ -94,7 +94,7 @@ def send_grade_to_credentials(
 
     response = credentials_client.post(
         api_url,
-        data
+        data=data,
     )
     response.raise_for_status()
     logger.info(f"Sent grade for user {username} in course {course_run_key} to Credentials")
@@ -208,14 +208,14 @@ def send_notifications(
             'status': cert.status
         }
         course_cert_info[(cert.user.id, str(cert.course_id))] = data
-        # # handles awarding course certificates in Credentials
-        # handle_course_cert_changed(**signal_args)
-        # # handles awarding program certificates in Credentials
-        # if notify_programs and CertificateStatuses.is_passing_status(cert.status):
-        #     handle_course_cert_awarded(**signal_args)
-        # # handles revoking program certificates in Credentials
-        # if revoke_program_certs and notify_programs and not CertificateStatuses.is_passing_status(cert.status):
-        #     handle_course_cert_revoked(**signal_args)
+        # handles awarding course certificates in Credentials
+        handle_course_cert_changed(**signal_args)
+        # handles awarding program certificates in Credentials
+        if notify_programs and CertificateStatuses.is_passing_status(cert.status):
+            handle_course_cert_awarded(**signal_args)
+        # handles revoking program certificates in Credentials
+        if revoke_program_certs and notify_programs and not CertificateStatuses.is_passing_status(cert.status):
+            handle_course_cert_revoked(**signal_args)
 
     # Then do grades
     for i, grade in paged_query(grades, delay, page_size):
